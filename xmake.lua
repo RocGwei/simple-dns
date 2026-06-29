@@ -1,7 +1,9 @@
 add_rules("mode.debug", "mode.release")
 
-add_cxflags("-Wall", "-Wextra")
-set_languages("c++17")
+set_toolchains("clang")
+add_cxflags("-Wall", "-Wextra", "-stdlib=libc++")
+add_ldflags("-stdlib=libc++")
+set_languages("c++23")
 
 target("simple-dns")
     set_kind("binary")
