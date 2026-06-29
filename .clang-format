@@ -1,3 +1,6 @@
 BasedOnStyle: Google
-ColumnLimit: 120
+ColumnLimit: 0
 IncludeBlocks: Preserve
+BreakConstructorInitializers: BeforeColon
+PackConstructorInitializers: Never
+Cpp11BracedListStyle: true

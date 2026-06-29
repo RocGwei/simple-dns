@@ -33,7 +33,9 @@ auto try_unwrap(std::expected<T, std::string>& result) {
 
 class BytePacketBuffer {
  public:
-  BytePacketBuffer() : m_buf{}, m_pos{} {}
+  BytePacketBuffer()
+      : m_buf{},
+        m_pos{} {}
 
   std::uint8_t* data() { return m_buf.data(); }
   std::size_t size() const { return m_buf.size(); }
@@ -184,33 +186,36 @@ std::expected<void, std::string> write_qname(BytePacketBuffer& buffer, const std
 enum class QueryType : std::uint16_t {
   UNKNOWN,
   A = 1,
+  NS = 2,
+  CNAME = 5,
+  MX = 15,
+  AAAA = 18,
 };
 
-std::uint16_t to_num(QueryType type) {
-  switch (type) {
-    case QueryType::A:
-      return 1;
-    default:
-      return 0;
-  }
+struct QueryTypeEntry {
+  QueryType type;
+  std::string_view name;
+};
+
+constexpr std::array query_type_table{
+    QueryTypeEntry{QueryType::UNKNOWN, "UNKNOWN"},
+    QueryTypeEntry{QueryType::A, "A"},
+    QueryTypeEntry{QueryType::NS, "NS"},
+    QueryTypeEntry{QueryType::CNAME, "CNAME"},
+    QueryTypeEntry{QueryType::MX, "MX"},
+    QueryTypeEntry{QueryType::AAAA, "AAAA"},
+};
+
+constexpr std::uint16_t to_num(QueryType type) { return static_cast<std::uint16_t>(type); }
+
+constexpr QueryType query_type_from_num(std::uint16_t num) {
+  auto it = std::ranges::find(query_type_table, static_cast<QueryType>(num), &QueryTypeEntry::type);
+  return it != query_type_table.end() ? it->type : QueryType::UNKNOWN;
 }
 
-QueryType query_type_from_num(std::uint16_t num) {
-  switch (num) {
-    case 1:
-      return QueryType::A;
-    default:
-      return QueryType::UNKNOWN;
-  }
-}
-
-std::string_view to_string(QueryType type) {
-  switch (type) {
-    case QueryType::A:
-      return "A";
-    default:
-      return "UNKNOWN";
-  }
+constexpr std::string_view to_string(QueryType type) {
+  auto it = std::ranges::find(query_type_table, type, &QueryTypeEntry::type);
+  return it != query_type_table.end() ? it->name : "UNKNOWN";
 }
 
 enum class ResultCode : std::uint8_t {
@@ -222,40 +227,30 @@ enum class ResultCode : std::uint8_t {
   REFUSED = 5,
 };
 
-ResultCode result_code_from_num(std::uint8_t num) {
-  switch (num) {
-    case 1:
-      return ResultCode::FORMERR;
-    case 2:
-      return ResultCode::SERVFAIL;
-    case 3:
-      return ResultCode::NXDOMAIN;
-    case 4:
-      return ResultCode::NOTIMP;
-    case 5:
-      return ResultCode::REFUSED;
-    default:
-      return ResultCode::NOERROR;
-  }
+struct ResultCodeEntry {
+  ResultCode code;
+  std::string_view name;
+};
+
+constexpr std::array result_code_table{
+    ResultCodeEntry{ResultCode::NOERROR, "NOERROR"},
+    ResultCodeEntry{ResultCode::FORMERR, "FORMERR"},
+    ResultCodeEntry{ResultCode::SERVFAIL, "SERVFAIL"},
+    ResultCodeEntry{ResultCode::NXDOMAIN, "NXDOMAIN"},
+    ResultCodeEntry{ResultCode::NOTIMP, "NOTIMP"},
+    ResultCodeEntry{ResultCode::REFUSED, "REFUSED"},
+};
+
+constexpr std::uint8_t to_num(ResultCode code) { return static_cast<std::uint8_t>(code); }
+
+constexpr ResultCode result_code_from_num(std::uint8_t num) {
+  auto it = std::ranges::find(result_code_table, static_cast<ResultCode>(num), &ResultCodeEntry::code);
+  return it != result_code_table.end() ? it->code : ResultCode::NOERROR;
 }
 
-std::string_view to_string(ResultCode code) {
-  switch (code) {
-    case ResultCode::NOERROR:
-      return "NOERROR";
-    case ResultCode::FORMERR:
-      return "FORMERR";
-    case ResultCode::SERVFAIL:
-      return "SERVFAIL";
-    case ResultCode::NXDOMAIN:
-      return "NXDOMAIN";
-    case ResultCode::NOTIMP:
-      return "NOTIMP";
-    case ResultCode::REFUSED:
-      return "REFUSED";
-    default:
-      return "UNKNOWN";
-  }
+constexpr std::string_view to_string(ResultCode code) {
+  auto it = std::ranges::find(result_code_table, code, &ResultCodeEntry::code);
+  return it != result_code_table.end() ? it->name : "NOERROR";
 }
 
 struct DnsHeader {
@@ -344,7 +339,10 @@ class ARecord : public DnsRecord {
   std::uint32_t m_ttl;
 
  public:
-  ARecord(std::string domain, Ipv4Addr addr, std::uint32_t ttl) : m_domain{domain}, m_addr{addr}, m_ttl{ttl} {};
+  ARecord(std::string domain, Ipv4Addr addr, std::uint32_t ttl)
+      : m_domain{domain},
+        m_addr{addr},
+        m_ttl{ttl} {};
 
   const std::string& domain() const override { return m_domain; }
   std::uint32_t ttl() const override { return m_ttl; }
@@ -376,6 +374,90 @@ class ARecord : public DnsRecord {
   }
 };
 
+class NsRecord : public DnsRecord {
+ private:
+  std::string m_domain;
+  std::string m_host;
+  std::uint32_t m_ttl;
+
+ public:
+  NsRecord(std::string domain, std::string host, std::uint32_t ttl)
+      : m_domain{domain},
+        m_host{host},
+        m_ttl{ttl} {}
+  const std::string& domain() const override { return m_domain; }
+  const std::string& host() const { return m_host; }
+  std::uint32_t ttl() const override { return m_ttl; }
+
+  void print(std::ostream& os) const override {
+    os << "NS {\n"
+       << "    domain: \"" << m_domain << "\",\n"
+       << "    host: " << m_host << ",\n"
+       << "    ttl: " << m_ttl << "\n"
+       << "}";
+  }
+
+  std::expected<std::size_t, std::string> write(BytePacketBuffer& buffer) const override {
+  }
+};
+
+class CnameRecord : public DnsRecord {
+ private:
+  std::string m_domain;
+  std::string m_host;
+  std::uint32_t m_ttl;
+
+ public:
+  CnameRecord(std::string domain, std::string host, std::uint32_t ttl)
+      : m_domain{domain},
+        m_host{host},
+        m_ttl{ttl} {}
+  const std::string& domain() const override { return m_domain; }
+  const std::string& host() const { return m_host; }
+  std::uint32_t ttl() const override { return m_ttl; }
+
+  void print(std::ostream& os) const override {
+    os << "CNAME {\n"
+       << "    domain: \"" << m_domain << "\",\n"
+       << "    host: " << m_host << ",\n"
+       << "    ttl: " << m_ttl << "\n"
+       << "}";
+  }
+
+  std::expected<std::size_t, std::string> write(BytePacketBuffer& buffer) const override {
+  }
+};
+
+class MxRecord : public DnsRecord {
+ private:
+  std::string m_domain;
+  std::uint16_t m_priority;
+  std::string m_host;
+  std::uint32_t m_ttl;
+
+ public:
+  MxRecord(std::string domain, std::uint16_t priority, std::string host, std::uint32_t ttl)
+      : m_domain{domain},
+        m_priority{priority},
+        m_host{host},
+        m_ttl{ttl} {}
+  const std::string& domain() const override { return m_domain; }
+  std::uint16_t priority() const { return m_priority; }
+  const std::string& host() const { return m_host; }
+  std::uint32_t ttl() const override { return m_ttl; }
+
+  void print(std::ostream& os) const override {
+    os << "CNAME {\n"
+       << "    domain: \"" << m_domain << "\",\n"
+       << "    host: " << m_host << ",\n"
+       << "    ttl: " << m_ttl << "\n"
+       << "}";
+  }
+
+  std::expected<std::size_t, std::string> write(BytePacketBuffer& buffer) const override {
+  }
+};
+
 class UnknownRecord : public DnsRecord {
  private:
   std::string m_domain;
@@ -385,7 +467,10 @@ class UnknownRecord : public DnsRecord {
 
  public:
   UnknownRecord(std::string domain, std::uint16_t qtype, std::uint16_t data_len, std::uint32_t ttl)
-      : m_domain{domain}, m_qtype{qtype}, m_data_len{data_len}, m_ttl{ttl} {}
+      : m_domain{domain},
+        m_qtype{qtype},
+        m_data_len{data_len},
+        m_ttl{ttl} {}
 
   const std::string& domain() const override { return m_domain; }
   std::uint32_t ttl() const override { return m_ttl; }
@@ -556,7 +641,7 @@ std::expected<void, std::string> write_dns_packet(BytePacketBuffer& buffer, DnsP
 }
 
 int main() {
-  std::string qname{"baidu.com"};
+  std::string qname{"www.yahoo.com"};
   QueryType qtype{QueryType::A};
 
   std::string server_ip{"8.8.8.8"};
