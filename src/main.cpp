@@ -5,9 +5,10 @@
 #include <expected>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <string_view>
 #include <type_traits>
-#include <variant>
 #include <vector>
 
 template <typename T>
@@ -33,46 +34,33 @@ class BytePacketBuffer {
   std::uint8_t* data() { return m_buf.data(); }
   std::size_t size() const { return m_buf.size(); }
 
-  // Current position within buffer
   std::size_t pos() const { return m_pos; }
-
-  // Step the buffer position forward a specific number of steps
   void step(std::size_t steps) { m_pos += steps; }
-
-  // Change the buffer position
   void seek(std::size_t pos) { m_pos = pos; }
 
-  // Read a single byte and move the position one step forward
   std::expected<std::uint8_t, std::string> read() {
     if (m_pos >= m_buf.size()) {
       return std::unexpected<std::string>{"End of buffer"};
     }
-
     std::uint8_t res = m_buf[m_pos];
     m_pos += 1;
-
     return res;
   }
 
-  // Get a single byte, without changing the buffer position
   std::expected<std::uint8_t, std::string> get(std::size_t pos) const {
     if (pos >= m_buf.size()) {
       return std::unexpected<std::string>{"End of buffer"};
     }
-
     return m_buf[pos];
   }
 
-  // Get a range of bytes
   std::expected<std::string, std::string> get_range(std::size_t start, std::size_t len) const {
-    if (start + len >= m_buf.size()) {
+    if (start + len > m_buf.size()) {
       return std::unexpected<std::string>{"End of buffer"};
     }
-
     return std::string{m_buf.begin() + start, m_buf.begin() + start + len};
   }
 
-  // Read two bytes, stepping two steps forward
   std::expected<std::uint16_t, std::string> read_u16() {
     auto high = read();
     if (!high) return std::unexpected(high.error());
@@ -81,7 +69,6 @@ class BytePacketBuffer {
     return (static_cast<std::uint16_t>(*high) << 8) | *low;
   }
 
-  // Read four bytes, stepping four steps forward
   std::expected<std::uint32_t, std::string> read_u32() {
     auto b1 = read();
     if (!b1) return std::unexpected(b1.error());
@@ -95,150 +82,89 @@ class BytePacketBuffer {
            (static_cast<std::uint32_t>(*b3) << 8) | *b4;
   }
 
-  /**
-   * Read a qname
-   *
-   * The tricky part: Reading domain names, taking labels into consideration.
-   * Will take something like [3]www[6]google[3]com[0] and return
-   * www.google.com.
-   */
-  std::expected<std::string, std::string> read_qname() {
-    std::string res{};
-
-    // Since we might encounter jumps, we'll keep track of our position
-    // locally as opposed to using the position within the struct. This
-    // allows us to move the shared position to a point past our current
-    // qname, while keeping track of our progress on the current qname
-    // using this variable.
-    std::size_t pos = this->pos();
-
-    // track whether or not we've jumped
-    bool jumped{false};
-    int max_jumps{5};
-    int jumps_performed{};
-
-    // Our delimiter which we append for each label. Since we don't want a
-    // dot at the beginning of the domain name we'll leave it empty for now
-    // and set it to "." at the end of the first iteration.
-    std::string delim = "";
-
-    while (true) {
-      if (jumps_performed > max_jumps) {
-        return std::unexpected("Limit of " + std::to_string(max_jumps) + "jumps exceeded");
-      }
-
-      // At this point, we're always at the beginning of a label. Recall
-      // that labels start with a length byte.
-      std::uint8_t len = TRY(get(pos));
-
-      // If len has the two most significant bit are set, it represents a
-      // jump to some other offset in the packet:
-      if ((len & 0xC0) == 0xC0) {
-        // Update the buffer position to a point past the current
-        // label. We don't need to touch it any further.
-        if (!jumped) {
-          seek(pos + 2);
-        }
-
-        // Read another byte, calculate offset and perform the jump by
-        // updating our local position variable
-        std::uint16_t b2 = TRY(get(pos + 1));
-        std::uint16_t offset = ((static_cast<std::uint16_t>(len) ^ 0xC0) << 8) | b2;
-        pos = offset;
-
-        // Indicate that a jump was performed.
-        jumped = true;
-        jumps_performed++;
-
-        continue;
-      }
-      // The base scenario, where we're reading a single label and
-      // appending it to the output:
-      else {
-        // Move a single byte forward to move past the length byte.
-        pos++;
-
-        // Domain names are terminated by an empty label of length 0,
-        // so if the length is zero we're done.
-        if (len == 0) {
-          break;
-        }
-
-        // Append the delimiter to our output buffer first.
-        res += delim;
-
-        // Extract the actual ASCII bytes for this label and append them
-        // to the output buffer.
-        std::string str_buffer = TRY(get_range(pos, len));
-        std::transform(str_buffer.begin(), str_buffer.end(), str_buffer.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-        res += str_buffer;
-
-        delim = ".";
-
-        // Move forward the full length of the label.
-        pos += len;
-      }
-    }
-
-    if (!jumped) {
-      seek(pos);
-    }
-
-    return res;
-  }
-
  private:
   std::array<std::uint8_t, 512> m_buf;
   std::size_t m_pos;
 };
 
+enum class QueryType : std::uint16_t {
+  UNKNOWN,
+  A = 1,
+};
+
+std::uint16_t to_num(QueryType type) {
+  switch (type) {
+    case QueryType::A:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+QueryType query_type_from_num(std::uint16_t num) {
+  switch (num) {
+    case 1:
+      return QueryType::A;
+    default:
+      return QueryType::UNKNOWN;
+  }
+}
+
+std::string_view to_string(QueryType type) {
+  switch (type) {
+    case QueryType::A:
+      return "A";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+enum class ResultCode : std::uint8_t {
+  NOERROR = 0,
+  FORMERR = 1,
+  SERVFAIL = 2,
+  NXDOMAIN = 3,
+  NOTIMP = 4,
+  REFUSED = 5,
+};
+
+static ResultCode result_code_from_num(std::uint8_t num) {
+  switch (num) {
+    case 1:
+      return ResultCode::FORMERR;
+    case 2:
+      return ResultCode::SERVFAIL;
+    case 3:
+      return ResultCode::NXDOMAIN;
+    case 4:
+      return ResultCode::NOTIMP;
+    case 5:
+      return ResultCode::REFUSED;
+    default:
+      return ResultCode::NOERROR;
+  }
+}
+
+static std::string_view to_string(ResultCode code) {
+  switch (code) {
+    case ResultCode::NOERROR:
+      return "NOERROR";
+    case ResultCode::FORMERR:
+      return "FORMERR";
+    case ResultCode::SERVFAIL:
+      return "SERVFAIL";
+    case ResultCode::NXDOMAIN:
+      return "NXDOMAIN";
+    case ResultCode::NOTIMP:
+      return "NOTIMP";
+    case ResultCode::REFUSED:
+      return "REFUSED";
+    default:
+      return "UNKNOWN";
+  }
+}
+
 struct DnsHeader {
-  enum class ResultCode : std::uint8_t {
-    NOERROR = 0,
-    FORMERR = 1,
-    SERVFAIL = 2,
-    NXDOMAIN = 3,
-    NOTIMP = 4,
-    REFUSED = 5,
-  };
-
-  static ResultCode from_num(std::uint8_t num) {
-    switch (num) {
-      case 1:
-        return ResultCode::FORMERR;
-      case 2:
-        return ResultCode::SERVFAIL;
-      case 3:
-        return ResultCode::NXDOMAIN;
-      case 4:
-        return ResultCode::NOTIMP;
-      case 5:
-        return ResultCode::REFUSED;
-      default:
-        return ResultCode::NOERROR;
-    }
-  }
-
-  static std::string_view to_string(ResultCode rc) {
-    switch (rc) {
-      case ResultCode::NOERROR:
-        return "NOERROR";
-      case ResultCode::FORMERR:
-        return "FORMERR";
-      case ResultCode::SERVFAIL:
-        return "SERVFAIL";
-      case ResultCode::NXDOMAIN:
-        return "NXDOMAIN";
-      case ResultCode::NOTIMP:
-        return "NOTIMP";
-      case ResultCode::REFUSED:
-        return "REFUSED";
-      default:
-        return "UNKNOWN";
-    }
-  }
-
   std::uint16_t id;
 
   bool recursion_desired;
@@ -257,106 +183,41 @@ struct DnsHeader {
   std::uint16_t answers;
   std::uint16_t authoritative_entries;
   std::uint16_t resource_entries;
-
-  std::expected<void, std::string> read(BytePacketBuffer& buffer) {
-    id = TRY(buffer.read_u16());
-
-    std::uint16_t flags = TRY(buffer.read_u16());
-    std::uint8_t a = (flags >> 8);
-    std::uint8_t b = (flags & 0xFF);
-    recursion_desired = (a & (1 << 0)) > 0;
-    truncated_message = (a & (1 << 1)) > 0;
-    authoritative_answer = (a & (1 << 2)) > 0;
-    opcode = (a >> 3) & 0x0F;
-    response = (a & (1 << 7)) > 0;
-
-    rescode = from_num(b & 0x0F);
-    checking_disabled = (b & (1 << 4)) > 0;
-    authed_data = (b & (1 << 5)) > 0;
-    z = (b & (1 << 6)) > 0;
-    recursion_available = (b & (1 << 7)) > 0;
-
-    questions = TRY(buffer.read_u16());
-    answers = TRY(buffer.read_u16());
-    authoritative_entries = TRY(buffer.read_u16());
-    resource_entries = TRY(buffer.read_u16());
-
-    return {};
-  }
-
-  friend std::ostream& operator<<(std::ostream& os, const DnsHeader& h) {
-    os << "DnsHeader {\n"
-       << "    id: " << h.id << ",\n"
-       << "    recursion_desired: " << (h.recursion_desired ? "true" : "false") << ",\n"
-       << "    truncated_message: " << (h.truncated_message ? "true" : "false") << ",\n"
-       << "    authoritative_answer: " << (h.authoritative_answer ? "true" : "false") << ",\n"
-       << "    opcode: " << (int)h.opcode << ",\n"
-       << "    response: " << (h.response ? "true" : "false") << ",\n"
-       << "    rescode: " << to_string(h.rescode) << ",\n"
-       << "    checking_disabled: " << (h.checking_disabled ? "true" : "false") << ",\n"
-       << "    authed_data: " << (h.authed_data ? "true" : "false") << ",\n"
-       << "    z: " << (h.z ? "true" : "false") << ",\n"
-       << "    recursion_available: " << (h.recursion_available ? "true" : "false") << ",\n"
-       << "    questions: " << h.questions << ",\n"
-       << "    answers: " << h.answers << ",\n"
-       << "    authoritative_entries: " << h.authoritative_entries << ",\n"
-       << "    resource_entries: " << h.resource_entries << "\n"
-       << "}";
-    return os;
-  }
 };
 
-enum class QueryType : std::uint16_t {
-  UNKNOWN,
-  A = 1,
-};
-
-std::uint16_t to_num(QueryType type) {
-  switch (type) {
-    case QueryType::A:
-      return 1;
-    default:
-      return 0;
-  }
-}
-
-QueryType from_num(std::uint16_t num) {
-  switch (num) {
-    case 1:
-      return QueryType::A;
-    default:
-      return QueryType::UNKNOWN;
-  }
-}
-
-std::string_view to_string(QueryType type) {
-  switch (type) {
-    case QueryType::A:
-      return "A";
-    default:
-      return "UNKNOWN";
-  }
+std::ostream& operator<<(std::ostream& os, const DnsHeader& h) {
+  os << "DnsHeader {\n"
+     << "    id: " << h.id << ",\n"
+     << "    recursion_desired: " << (h.recursion_desired ? "true" : "false") << ",\n"
+     << "    truncated_message: " << (h.truncated_message ? "true" : "false") << ",\n"
+     << "    authoritative_answer: " << (h.authoritative_answer ? "true" : "false") << ",\n"
+     << "    opcode: " << (int)h.opcode << ",\n"
+     << "    response: " << (h.response ? "true" : "false") << ",\n"
+     << "    rescode: " << to_string(h.rescode) << ",\n"
+     << "    checking_disabled: " << (h.checking_disabled ? "true" : "false") << ",\n"
+     << "    authed_data: " << (h.authed_data ? "true" : "false") << ",\n"
+     << "    z: " << (h.z ? "true" : "false") << ",\n"
+     << "    recursion_available: " << (h.recursion_available ? "true" : "false") << ",\n"
+     << "    questions: " << h.questions << ",\n"
+     << "    answers: " << h.answers << ",\n"
+     << "    authoritative_entries: " << h.authoritative_entries << ",\n"
+     << "    resource_entries: " << h.resource_entries << "\n"
+     << "}";
+  return os;
 }
 
 struct DnsQuestion {
   std::string name;
   QueryType qtype;
-
-  std::expected<void, std::string> read(BytePacketBuffer& buffer) {
-    name = TRY(buffer.read_qname());
-    qtype = from_num(TRY(buffer.read_u16()));
-    TRY(buffer.read_u16());  // skip class
-    return {};
-  }
-
-  friend std::ostream& operator<<(std::ostream& os, const DnsQuestion& q) {
-    os << "DnsQuestion {\n"
-       << "    name: \"" << q.name << "\",\n"
-       << "    qtype: " << to_string(q.qtype) << "\n"
-       << "}";
-    return os;
-  }
 };
+
+std::ostream& operator<<(std::ostream& os, const DnsQuestion& q) {
+  os << "DnsQuestion {\n"
+     << "    name: \"" << q.name << "\",\n"
+     << "    qtype: " << to_string(q.qtype) << "\n"
+     << "}";
+  return os;
+}
 
 struct Ipv4Addr {
   std::uint8_t a, b, c, d;
@@ -366,46 +227,176 @@ struct Ipv4Addr {
   }
 };
 
-struct ARecord {
-  std::string domain;
-  Ipv4Addr addr;
-  std::uint32_t ttl;
+class DnsRecord {
+ public:
+  virtual ~DnsRecord() = default;
 
-  friend std::ostream& operator<<(std::ostream& os, const ARecord& r) {
+  virtual const std::string& domain() const = 0;
+  virtual std::uint32_t ttl() const = 0;
+
+  virtual void print(std::ostream& os) const = 0;
+  friend std::ostream& operator<<(std::ostream& os, const DnsRecord& r) {
+    r.print(os);
+    return os;
+  }
+};
+
+class ARecord : public DnsRecord {
+ private:
+  std::string m_domain;
+  Ipv4Addr m_addr;
+  std::uint32_t m_ttl;
+
+ public:
+  ARecord(std::string domain, Ipv4Addr addr, std::uint32_t ttl) : m_domain{domain}, m_addr{addr}, m_ttl{ttl} {};
+
+  const std::string& domain() const override { return m_domain; }
+  std::uint32_t ttl() const override { return m_ttl; }
+  const Ipv4Addr& addr() const { return m_addr; }
+
+  void print(std::ostream& os) const override {
     os << "A {\n"
-       << "    domain: \"" << r.domain << "\",\n"
-       << "    addr: " << r.addr.to_string() << ",\n"
-       << "    ttl: " << r.ttl << "\n"
+       << "    domain: \"" << m_domain << "\",\n"
+       << "    addr: " << m_addr.to_string() << ",\n"
+       << "    ttl: " << m_ttl << "\n"
        << "}";
-    return os;
-  }
+  };
 };
 
-struct UnknownRecord {
-  std::string domain;
-  std::uint16_t qtype;
-  std::uint16_t data_len;
-  std::uint32_t ttl;
+class UnknownRecord : public DnsRecord {
+ private:
+  std::string m_domain;
+  std::uint16_t m_qtype;
+  std::uint16_t m_data_len;
+  std::uint32_t m_ttl;
 
-  friend std::ostream& operator<<(std::ostream& os, const UnknownRecord& r) {
+ public:
+  UnknownRecord(std::string domain, std::uint16_t qtype, std::uint16_t data_len, std::uint32_t ttl)
+      : m_domain{domain}, m_qtype{qtype}, m_data_len{data_len}, m_ttl{ttl} {}
+
+  const std::string& domain() const override { return m_domain; }
+  std::uint32_t ttl() const override { return m_ttl; }
+  std::uint16_t qtype() const { return m_qtype; }
+  std::uint16_t data_len() const { return m_data_len; }
+
+  void print(std::ostream& os) const override {
     os << "Unknown {\n"
-       << "    domain: \"" << r.domain << "\",\n"
-       << "    type: " << r.qtype << ",\n"
-       << "    len: " << r.data_len << ",\n"
-       << "    ttl: " << r.ttl << "\n"
+       << "    domain: \"" << m_domain << "\",\n"
+       << "    type: " << m_qtype << ",\n"
+       << "    len: " << m_data_len << ",\n"
+       << "    ttl: " << m_ttl << "\n"
        << "}";
-    return os;
   }
 };
 
-using DnsRecord = std::variant<ARecord, UnknownRecord>;
+struct DnsPacket {
+  DnsHeader header;
+  std::vector<DnsQuestion> questions;
+  std::vector<std::unique_ptr<DnsRecord>> answers;
+  std::vector<std::unique_ptr<DnsRecord>> authorities;
+  std::vector<std::unique_ptr<DnsRecord>> resources;
+};
 
-std::expected<DnsRecord, std::string> read_dns_record(BytePacketBuffer& buffer) {
-  std::string domain = TRY(buffer.read_qname());
+std::expected<std::string, std::string> read_qname(BytePacketBuffer& buffer) {
+  std::string res{};
+
+  std::size_t pos = buffer.pos();
+
+  bool jumped{false};
+  int max_jumps{5};
+  int jumps_performed{};
+
+  std::string delim = "";
+
+  while (true) {
+    if (jumps_performed > max_jumps) {
+      return std::unexpected("Limit of " + std::to_string(max_jumps) + "jumps exceeded");
+    }
+
+    std::uint8_t len = TRY(buffer.get(pos));
+
+    if ((len & 0xC0) == 0xC0) {
+      if (!jumped) {
+        buffer.seek(pos + 2);
+      }
+
+      std::uint16_t b2 = TRY(buffer.get(pos + 1));
+      std::uint16_t offset = ((static_cast<std::uint16_t>(len) ^ 0xC0) << 8) | b2;
+      pos = offset;
+
+      jumped = true;
+      jumps_performed++;
+
+      continue;
+    } else {
+      pos++;
+
+      if (len == 0) {
+        break;
+      }
+
+      res += delim;
+
+      std::string str_buffer = TRY(buffer.get_range(pos, len));
+      std::transform(str_buffer.begin(), str_buffer.end(), str_buffer.begin(),
+                     [](unsigned char c) { return std::tolower(c); });
+      res += str_buffer;
+
+      delim = ".";
+
+      pos += len;
+    }
+  }
+
+  if (!jumped) {
+    buffer.seek(pos);
+  }
+
+  return res;
+}
+
+std::expected<DnsHeader, std::string> read_dns_header(BytePacketBuffer& buffer) {
+  DnsHeader h{};
+
+  h.id = TRY(buffer.read_u16());
+
+  std::uint16_t flags = TRY(buffer.read_u16());
+  std::uint8_t a = (flags >> 8);
+  std::uint8_t b = (flags & 0xFF);
+  h.recursion_desired = (a & (1 << 0)) > 0;
+  h.truncated_message = (a & (1 << 1)) > 0;
+  h.authoritative_answer = (a & (1 << 2)) > 0;
+  h.opcode = (a >> 3) & 0x0F;
+  h.response = (a & (1 << 7)) > 0;
+
+  h.rescode = result_code_from_num(b & 0x0F);
+  h.checking_disabled = (b & (1 << 4)) > 0;
+  h.authed_data = (b & (1 << 5)) > 0;
+  h.z = (b & (1 << 6)) > 0;
+  h.recursion_available = (b & (1 << 7)) > 0;
+
+  h.questions = TRY(buffer.read_u16());
+  h.answers = TRY(buffer.read_u16());
+  h.authoritative_entries = TRY(buffer.read_u16());
+  h.resource_entries = TRY(buffer.read_u16());
+
+  return h;
+}
+
+std::expected<DnsQuestion, std::string> read_dns_question(BytePacketBuffer& buffer) {
+  DnsQuestion q{};
+  q.name = TRY(read_qname(buffer));
+  q.qtype = query_type_from_num(TRY(buffer.read_u16()));
+  TRY(buffer.read_u16());  // skip class
+  return q;
+}
+
+std::expected<std::unique_ptr<DnsRecord>, std::string> read_dns_record(BytePacketBuffer& buffer) {
+  std::string domain = TRY(read_qname(buffer));
 
   std::uint16_t qtype_num = TRY(buffer.read_u16());
-  QueryType qtype = from_num(qtype_num);
-  TRY(buffer.read_u16());  // 跳过 class（忽略）
+  QueryType qtype = query_type_from_num(qtype_num);
+  TRY(buffer.read_u16());  // skip class
   std::uint32_t ttl = TRY(buffer.read_u32());
   std::uint16_t data_len = TRY(buffer.read_u16());
 
@@ -418,51 +409,38 @@ std::expected<DnsRecord, std::string> read_dns_record(BytePacketBuffer& buffer) 
           static_cast<std::uint8_t>((raw_addr >> 8) & 0xFF),
           static_cast<std::uint8_t>((raw_addr >> 0) & 0xFF),
       };
-      return ARecord{std::move(domain), addr, ttl};
+      return std::make_unique<ARecord>(std::move(domain), addr, ttl);
     }
     default: {
       buffer.step(data_len);
-      return UnknownRecord{std::move(domain), qtype_num, data_len, ttl};
+      return std::make_unique<UnknownRecord>(std::move(domain), qtype_num, data_len, ttl);
     }
   }
 }
 
-template <class... Ts>
-struct overloaded : Ts... {
-  using Ts::operator()...;
-};
-template <class... Ts>
-overloaded(Ts...) -> overloaded<Ts...>;
-struct DnsPacket {
-  DnsHeader header;
-  std::vector<DnsQuestion> questions;
-  std::vector<DnsRecord> answers;
-  std::vector<DnsRecord> authorities;
-  std::vector<DnsRecord> resources;
+std::expected<DnsPacket, std::string> read_dns_packet(BytePacketBuffer& buffer) {
+  DnsPacket packet{};
 
-  std::expected<void, std::string> from_buffer(BytePacketBuffer& buffer) {
-    TRY(header.read(buffer));
+  packet.header = TRY(read_dns_header(buffer));
 
-    for (int i = 0; i < header.questions; i++) {
-      DnsQuestion question{};
-      TRY(question.read(buffer));
-      questions.push_back(question);
-    }
-
-    for (int i = 0; i < header.answers; i++) {
-      answers.emplace_back(TRY(read_dns_record(buffer)));
-    }
-
-    for (int i = 0; i < header.authoritative_entries; i++) {
-      authorities.emplace_back(TRY(read_dns_record(buffer)));
-    }
-
-    for (int i = 0; i < header.resource_entries; i++) {
-      resources.emplace_back(TRY(read_dns_record(buffer)));
-    }
-    return {};
+  for (int i = 0; i < packet.header.questions; i++) {
+    packet.questions.push_back(TRY(read_dns_question(buffer)));
   }
-};
+
+  for (int i = 0; i < packet.header.answers; i++) {
+    packet.answers.emplace_back(TRY(read_dns_record(buffer)));
+  }
+
+  for (int i = 0; i < packet.header.authoritative_entries; i++) {
+    packet.authorities.emplace_back(TRY(read_dns_record(buffer)));
+  }
+
+  for (int i = 0; i < packet.header.resource_entries; i++) {
+    packet.resources.emplace_back(TRY(read_dns_record(buffer)));
+  }
+
+  return packet;
+}
 
 int main() {
   std::ifstream file("response_packet.txt", std::ios::binary);
@@ -474,15 +452,16 @@ int main() {
   BytePacketBuffer buffer;
   file.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
 
-  // 检查实际读取了多少字节（可选）
   std::streamsize bytes_read = file.gcount();
   std::cout << "Read " << bytes_read << " bytes from file" << std::endl;
 
-  DnsPacket packet;
-  auto result = packet.from_buffer(buffer);
-  if (!result) {
-    std::cerr << result.error();
+  auto packet_result = read_dns_packet(buffer);
+  if (!packet_result) {
+    std::cerr << packet_result.error() << std::endl;
+    return 1;
   }
+
+  const auto& packet = *packet_result;
 
   std::cout << "\n=== Header ===" << std::endl;
   std::cout << packet.header << std::endl;
@@ -492,10 +471,10 @@ int main() {
     std::cout << "  " << q << std::endl;
   }
 
-  auto print_records = [](const std::string& label, const std::vector<DnsRecord>& records) {
+  auto print_records = [](const std::string& label, const std::vector<std::unique_ptr<DnsRecord>>& records) {
     std::cout << "\n=== " << label << " (" << records.size() << ") ===" << std::endl;
     for (const auto& rec : records) {
-      std::visit([](const auto& r) { std::cout << r << std::endl; }, rec);
+      std::cout << *rec << '\n';
     }
   };
 
