@@ -33,7 +33,9 @@ auto try_unwrap(std::expected<T, std::string>& result) {
 
 class BytePacketBuffer {
  public:
-  BytePacketBuffer() : m_buf{}, m_pos{} {}
+  BytePacketBuffer()
+      : m_buf{},
+        m_pos{} {}
 
   std::uint8_t* data() { return m_buf.data(); }
   std::size_t size() const { return m_buf.size(); }
@@ -60,6 +62,14 @@ class BytePacketBuffer {
     return {};
   }
 
+  std::expected<void, std::string> set_u8(std::size_t pos, std::uint8_t val) {
+    if (pos >= m_buf.size()) {
+      return std::unexpected<std::string>{"End of buffer"};
+    }
+    m_buf[pos] = val;
+    return {};
+  }
+
   std::expected<std::uint8_t, std::string> get(std::size_t pos) const {
     if (pos >= m_buf.size()) {
       return std::unexpected<std::string>{"End of buffer"};
@@ -83,6 +93,15 @@ class BytePacketBuffer {
   std::expected<void, std::string> write_u16(std::uint16_t val) {
     TRY(write_u8(static_cast<std::uint8_t>(val >> 8)));
     TRY(write_u8(static_cast<std::uint8_t>(val & 0xFF)));
+    return {};
+  }
+
+  std::expected<void, std::string> set_u16(std::size_t pos, std::uint16_t val) {
+    if (pos + 1 >= m_buf.size()) {
+      return std::unexpected<std::string>{"End of buffer"};
+    }
+    TRY(set_u8(pos, static_cast<std::uint8_t>(val >> 8)));
+    TRY(set_u8(pos + 1, static_cast<std::uint8_t>(val & 0xFF)));
     return {};
   }
 
@@ -148,7 +167,7 @@ std::expected<std::string, std::string> read_qname(BytePacketBuffer& buffer) {
 
       res += delim;
 
-      std::string str_buffer = TRY(buffer.get_range(pos, len));
+      std::string str_buffer{TRY(buffer.get_range(pos, len))};
       std::transform(str_buffer.begin(), str_buffer.end(), str_buffer.begin(),
                      [](unsigned char c) { return std::tolower(c); });
       res += str_buffer;
@@ -184,33 +203,36 @@ std::expected<void, std::string> write_qname(BytePacketBuffer& buffer, const std
 enum class QueryType : std::uint16_t {
   UNKNOWN,
   A = 1,
+  NS = 2,
+  CNAME = 5,
+  MX = 15,
+  AAAA = 18,
 };
 
-std::uint16_t to_num(QueryType type) {
-  switch (type) {
-    case QueryType::A:
-      return 1;
-    default:
-      return 0;
-  }
+struct QueryTypeEntry {
+  QueryType type;
+  std::string_view name;
+};
+
+constexpr std::array query_type_table{
+    QueryTypeEntry{QueryType::UNKNOWN, "UNKNOWN"},
+    QueryTypeEntry{QueryType::A, "A"},
+    QueryTypeEntry{QueryType::NS, "NS"},
+    QueryTypeEntry{QueryType::CNAME, "CNAME"},
+    QueryTypeEntry{QueryType::MX, "MX"},
+    QueryTypeEntry{QueryType::AAAA, "AAAA"},
+};
+
+constexpr std::uint16_t to_num(QueryType type) { return static_cast<std::uint16_t>(type); }
+
+constexpr QueryType query_type_from_num(std::uint16_t num) {
+  auto it{std::ranges::find(query_type_table, static_cast<QueryType>(num), &QueryTypeEntry::type)};
+  return it != query_type_table.end() ? it->type : QueryType::UNKNOWN;
 }
 
-QueryType query_type_from_num(std::uint16_t num) {
-  switch (num) {
-    case 1:
-      return QueryType::A;
-    default:
-      return QueryType::UNKNOWN;
-  }
-}
-
-std::string_view to_string(QueryType type) {
-  switch (type) {
-    case QueryType::A:
-      return "A";
-    default:
-      return "UNKNOWN";
-  }
+constexpr std::string_view to_string(QueryType type) {
+  auto it{std::ranges::find(query_type_table, type, &QueryTypeEntry::type)};
+  return it != query_type_table.end() ? it->name : "UNKNOWN";
 }
 
 enum class ResultCode : std::uint8_t {
@@ -222,40 +244,30 @@ enum class ResultCode : std::uint8_t {
   REFUSED = 5,
 };
 
-ResultCode result_code_from_num(std::uint8_t num) {
-  switch (num) {
-    case 1:
-      return ResultCode::FORMERR;
-    case 2:
-      return ResultCode::SERVFAIL;
-    case 3:
-      return ResultCode::NXDOMAIN;
-    case 4:
-      return ResultCode::NOTIMP;
-    case 5:
-      return ResultCode::REFUSED;
-    default:
-      return ResultCode::NOERROR;
-  }
+struct ResultCodeEntry {
+  ResultCode code;
+  std::string_view name;
+};
+
+constexpr std::array result_code_table{
+    ResultCodeEntry{ResultCode::NOERROR, "NOERROR"},
+    ResultCodeEntry{ResultCode::FORMERR, "FORMERR"},
+    ResultCodeEntry{ResultCode::SERVFAIL, "SERVFAIL"},
+    ResultCodeEntry{ResultCode::NXDOMAIN, "NXDOMAIN"},
+    ResultCodeEntry{ResultCode::NOTIMP, "NOTIMP"},
+    ResultCodeEntry{ResultCode::REFUSED, "REFUSED"},
+};
+
+constexpr std::uint8_t to_num(ResultCode code) { return static_cast<std::uint8_t>(code); }
+
+constexpr ResultCode result_code_from_num(std::uint8_t num) {
+  auto it = std::ranges::find(result_code_table, static_cast<ResultCode>(num), &ResultCodeEntry::code);
+  return it != result_code_table.end() ? it->code : ResultCode::NOERROR;
 }
 
-std::string_view to_string(ResultCode code) {
-  switch (code) {
-    case ResultCode::NOERROR:
-      return "NOERROR";
-    case ResultCode::FORMERR:
-      return "FORMERR";
-    case ResultCode::SERVFAIL:
-      return "SERVFAIL";
-    case ResultCode::NXDOMAIN:
-      return "NXDOMAIN";
-    case ResultCode::NOTIMP:
-      return "NOTIMP";
-    case ResultCode::REFUSED:
-      return "REFUSED";
-    default:
-      return "UNKNOWN";
-  }
+constexpr std::string_view to_string(ResultCode code) {
+  auto it = std::ranges::find(result_code_table, code, &ResultCodeEntry::code);
+  return it != result_code_table.end() ? it->name : "NOERROR";
 }
 
 struct DnsHeader {
@@ -314,10 +326,22 @@ std::ostream& operator<<(std::ostream& os, const DnsQuestion& q) {
 }
 
 struct Ipv4Addr {
-  std::uint8_t a, b, c, d;
+  struct in_addr addr;
 
   std::string to_string() const {
-    return std::to_string(a) + "." + std::to_string(b) + "." + std::to_string(c) + "." + std::to_string(d);
+    char buf[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &addr, buf, sizeof(buf));
+    return buf;
+  }
+};
+
+struct Ipv6Addr {
+  struct in6_addr addr;
+
+  std::string to_string() const {
+    char buf[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6, &addr, buf, sizeof(buf));
+    return buf;
   }
 };
 
@@ -344,7 +368,10 @@ class ARecord : public DnsRecord {
   std::uint32_t m_ttl;
 
  public:
-  ARecord(std::string domain, Ipv4Addr addr, std::uint32_t ttl) : m_domain{domain}, m_addr{addr}, m_ttl{ttl} {};
+  ARecord(std::string domain, Ipv4Addr addr, std::uint32_t ttl)
+      : m_domain{domain},
+        m_addr{addr},
+        m_ttl{ttl} {};
 
   const std::string& domain() const override { return m_domain; }
   std::uint32_t ttl() const override { return m_ttl; }
@@ -367,12 +394,179 @@ class ARecord : public DnsRecord {
     TRY(buffer.write_u32(m_ttl));
     TRY(buffer.write_u16(4));
 
-    TRY(buffer.write_u8(m_addr.a));
-    TRY(buffer.write_u8(m_addr.b));
-    TRY(buffer.write_u8(m_addr.c));
-    TRY(buffer.write_u8(m_addr.d));
+    auto raw = ntohl(m_addr.addr.s_addr);
+    TRY(buffer.write_u8(static_cast<std::uint8_t>((raw >> 24) & 0xFF)));
+    TRY(buffer.write_u8(static_cast<std::uint8_t>((raw >> 16) & 0xFF)));
+    TRY(buffer.write_u8(static_cast<std::uint8_t>((raw >> 8) & 0xFF)));
+    TRY(buffer.write_u8(static_cast<std::uint8_t>((raw >> 0) & 0xFF)));
 
     return {buffer.pos() - start_pos};
+  }
+};
+
+class NsRecord : public DnsRecord {
+ private:
+  std::string m_domain;
+  std::string m_host;
+  std::uint32_t m_ttl;
+
+ public:
+  NsRecord(std::string domain, std::string host, std::uint32_t ttl)
+      : m_domain{domain},
+        m_host{host},
+        m_ttl{ttl} {}
+  const std::string& domain() const override { return m_domain; }
+  const std::string& host() const { return m_host; }
+  std::uint32_t ttl() const override { return m_ttl; }
+
+  void print(std::ostream& os) const override {
+    os << "NS {\n"
+       << "    domain: \"" << m_domain << "\",\n"
+       << "    host: " << m_host << ",\n"
+       << "    ttl: " << m_ttl << "\n"
+       << "}";
+  }
+
+  std::expected<std::size_t, std::string> write(BytePacketBuffer& buffer) const override {
+    auto start_pos = buffer.pos();
+
+    TRY(write_qname(buffer, m_domain));
+    TRY(buffer.write_u16(static_cast<std::uint16_t>(QueryType::NS)));
+    TRY(buffer.write_u16(1));
+    TRY(buffer.write_u32(m_ttl));
+
+    std::size_t pos = buffer.pos();
+    TRY(buffer.write_u16(0));
+    TRY(write_qname(buffer, m_host));
+
+    auto size = buffer.pos() - (pos + 2);
+    TRY(buffer.set_u16(pos, size));
+    return {buffer.pos() - start_pos};
+  }
+};
+
+class CnameRecord : public DnsRecord {
+ private:
+  std::string m_domain;
+  std::string m_host;
+  std::uint32_t m_ttl;
+
+ public:
+  CnameRecord(std::string domain, std::string host, std::uint32_t ttl)
+      : m_domain{domain},
+        m_host{host},
+        m_ttl{ttl} {}
+  const std::string& domain() const override { return m_domain; }
+  const std::string& host() const { return m_host; }
+  std::uint32_t ttl() const override { return m_ttl; }
+
+  void print(std::ostream& os) const override {
+    os << "CNAME {\n"
+       << "    domain: \"" << m_domain << "\",\n"
+       << "    host: " << m_host << ",\n"
+       << "    ttl: " << m_ttl << "\n"
+       << "}";
+  }
+
+  std::expected<std::size_t, std::string> write(BytePacketBuffer& buffer) const override {
+    auto start_pos = buffer.pos();
+
+    TRY(write_qname(buffer, m_domain));
+    TRY(buffer.write_u16(static_cast<std::uint16_t>(QueryType::CNAME)));
+    TRY(buffer.write_u16(1));
+    TRY(buffer.write_u32(m_ttl));
+
+    auto pos = buffer.pos();
+    TRY(buffer.write_u16(0));
+    TRY(write_qname(buffer, m_host));
+
+    auto size = buffer.pos() - (pos + 2);
+    TRY(buffer.set_u16(pos, size));
+    return buffer.pos() - start_pos;
+  }
+};
+
+class MxRecord : public DnsRecord {
+ private:
+  std::string m_domain;
+  std::uint16_t m_priority;
+  std::string m_host;
+  std::uint32_t m_ttl;
+
+ public:
+  MxRecord(std::string domain, std::uint16_t priority, std::string host, std::uint32_t ttl)
+      : m_domain{domain},
+        m_priority{priority},
+        m_host{host},
+        m_ttl{ttl} {}
+  const std::string& domain() const override { return m_domain; }
+  std::uint16_t priority() const { return m_priority; }
+  const std::string& host() const { return m_host; }
+  std::uint32_t ttl() const override { return m_ttl; }
+
+  void print(std::ostream& os) const override {
+    os << "MX {\n"
+       << "    domain: \"" << m_domain << "\",\n"
+       << "    priority: " << m_priority << ",\n"
+       << "    host: " << m_host << ",\n"
+       << "    ttl: " << m_ttl << "\n"
+       << "}";
+  }
+
+  std::expected<std::size_t, std::string> write(BytePacketBuffer& buffer) const override {
+    auto start_pos = buffer.pos();
+
+    TRY(write_qname(buffer, m_domain));
+    TRY(buffer.write_u16(static_cast<std::uint16_t>(QueryType::MX)));
+    TRY(buffer.write_u16(1));
+    TRY(buffer.write_u32(m_ttl));
+
+    auto pos = buffer.pos();
+    TRY(buffer.write_u16(0));
+    TRY(buffer.write_u16(m_priority));
+    TRY(write_qname(buffer, m_host));
+
+    auto size = buffer.pos() - (pos + 2);
+    TRY(buffer.set_u16(pos, size));
+
+    return buffer.pos() - start_pos;
+  }
+};
+
+class AaaaRecord : public DnsRecord {
+ private:
+  std::string m_domain;
+  Ipv6Addr m_addr;
+  std::uint32_t m_ttl;
+
+ public:
+  AaaaRecord(std::string domain, Ipv6Addr addr, std::uint32_t ttl)
+      : m_domain{domain},
+        m_addr{addr},
+        m_ttl{ttl} {}
+  const std::string& domain() const override { return m_domain; }
+  Ipv6Addr addr() const { return m_addr; }
+  std::uint32_t ttl() const override { return m_ttl; }
+
+  void print(std::ostream& os) const override {
+    os << "AAAA {\n"
+       << "    domain: \"" << m_domain << "\",\n"
+       << "    addr: " << m_addr.to_string() << ",\n"
+       << "    ttl: " << m_ttl << "\n"
+       << "}";
+  }
+
+  std::expected<std::size_t, std::string> write(BytePacketBuffer& buffer) const override {
+    TRY(write_qname(buffer, m_domain));
+    TRY(buffer.write_u16(static_cast<std::uint16_t>(QueryType::AAAA)));
+    TRY(buffer.write_u16(1));
+    TRY(buffer.write_u32(m_ttl));
+    TRY(buffer.write_u16(16));
+
+    for (int i = 0; i < 8; i++) {
+      TRY(buffer.write_u16(m_addr.addr.s6_addr16[i]));
+    }
+    return {};
   }
 };
 
@@ -385,7 +579,10 @@ class UnknownRecord : public DnsRecord {
 
  public:
   UnknownRecord(std::string domain, std::uint16_t qtype, std::uint16_t data_len, std::uint32_t ttl)
-      : m_domain{domain}, m_qtype{qtype}, m_data_len{data_len}, m_ttl{ttl} {}
+      : m_domain{domain},
+        m_qtype{qtype},
+        m_data_len{data_len},
+        m_ttl{ttl} {}
 
   const std::string& domain() const override { return m_domain; }
   std::uint32_t ttl() const override { return m_ttl; }
@@ -489,13 +686,32 @@ std::expected<std::unique_ptr<DnsRecord>, std::string> DnsRecord::read(BytePacke
   switch (qtype) {
     case QueryType::A: {
       std::uint32_t raw_addr = TRY(buffer.read_u32());
-      Ipv4Addr addr{
-          static_cast<std::uint8_t>((raw_addr >> 24) & 0xFF),
-          static_cast<std::uint8_t>((raw_addr >> 16) & 0xFF),
-          static_cast<std::uint8_t>((raw_addr >> 8) & 0xFF),
-          static_cast<std::uint8_t>((raw_addr >> 0) & 0xFF),
-      };
+      Ipv4Addr addr;
+      addr.addr.s_addr = raw_addr;
       return std::make_unique<ARecord>(std::move(domain), addr, ttl);
+    }
+    case QueryType::NS: {
+      std::string ns = TRY(read_qname(buffer));
+      return std::make_unique<NsRecord>(std::move(domain), std::move(ns), ttl);
+    }
+    case QueryType::CNAME: {
+      std::string cname = TRY(read_qname(buffer));
+      return std::make_unique<CnameRecord>(std::move(domain), std::move(cname), ttl);
+    }
+    case QueryType::MX: {
+      std::uint16_t priority = TRY(buffer.read_u16());
+      std::string mx = TRY(read_qname(buffer));
+      return std::make_unique<MxRecord>(std::move(domain), priority, std::move(mx), ttl);
+    }
+    case QueryType::AAAA: {
+      std::array<std::uint8_t, 16> octets;
+      for (auto& o : octets) {
+        o = TRY(buffer.read_u8());
+      }
+
+      Ipv6Addr addr;
+      std::ranges::copy(octets, addr.addr.s6_addr);
+      return std::make_unique<AaaaRecord>(std::move(domain), addr, ttl);
     }
     default: {
       buffer.step(data_len);
@@ -556,8 +772,8 @@ std::expected<void, std::string> write_dns_packet(BytePacketBuffer& buffer, DnsP
 }
 
 int main() {
-  std::string qname{"baidu.com"};
-  QueryType qtype{QueryType::A};
+  std::string qname{"yahoo.com"};
+  QueryType qtype{QueryType::MX};
 
   std::string server_ip{"8.8.8.8"};
   std::uint16_t port{53};
