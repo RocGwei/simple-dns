@@ -9,11 +9,13 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 template <typename T>
 auto try_unwrap(std::expected<T, std::string>& result) {
@@ -648,7 +650,7 @@ std::expected<void, std::string> write_dns_header(BytePacketBuffer& buffer, cons
   TRY(buffer.write_u8(
       static_cast<std::uint8_t>(header.rescode) | (static_cast<std::uint8_t>(header.checking_disabled) << 4) |
       (static_cast<std::uint8_t>(header.authed_data) << 5) | (static_cast<std::uint8_t>(header.z) << 6) |
-      (static_cast<std::uint8_t>(header.recursion_desired) << 7)));
+      (static_cast<std::uint8_t>(header.recursion_available) << 7)));
 
   TRY(buffer.write_u16(header.questions));
   TRY(buffer.write_u16(header.answers));
@@ -771,51 +773,154 @@ std::expected<void, std::string> write_dns_packet(BytePacketBuffer& buffer, DnsP
   return {};
 }
 
-int main() {
-  std::string qname{"yahoo.com"};
-  QueryType qtype{QueryType::MX};
+std::expected<DnsPacket, std::string> lookup(const std::string& qname, QueryType qtype) {
+  sockaddr_in server{};
+  server.sin_family = AF_INET;
+  server.sin_port = htons(53);
+  inet_pton(AF_INET, "8.8.8.8", &server.sin_addr.s_addr);
 
-  std::string server_ip{"8.8.8.8"};
-  std::uint16_t port{53};
+  int sock = socket(AF_INET, SOCK_DGRAM, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(43210);
+  int ret = bind(sock, (struct sockaddr*)&addr, sizeof(addr));
+  if (ret < 0) {
+    return std::unexpected{"bind"};
+  }
 
   DnsPacket packet{};
   packet.header.id = 6666;
   packet.header.questions = 1;
   packet.header.recursion_desired = true;
-  packet.questions.emplace_back(qname, qtype);
+  packet.questions.push_back(DnsQuestion{qname, qtype});
 
   BytePacketBuffer req_buffer{};
-  auto write_result = write_dns_packet(req_buffer, packet);
-  if (!write_result) {
-    std::cerr << write_result.error();
-  }
+  TRY(write_dns_packet(req_buffer, packet));
+  sendto(sock, req_buffer.data(), req_buffer.pos(), 0, (struct sockaddr*)&server, sizeof(server));
 
-  int sock = socket(AF_INET, SOCK_DGRAM, 0);
-  struct sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
-  inet_pton(AF_INET, server_ip.c_str(), &addr.sin_addr);
-
-  sendto(sock, req_buffer.data(), req_buffer.pos(), 0, (struct sockaddr*)&addr, sizeof(addr));
-
-  struct sockaddr_in src_addr{};
-  socklen_t src_len = sizeof(src_addr);
   BytePacketBuffer res_buffer{};
-  recvfrom(sock, res_buffer.data(), res_buffer.size(), 0, (struct sockaddr*)&src_addr, &src_len);
-  res_buffer.seek(0);
+  socklen_t server_len = sizeof(server);
+  recvfrom(sock, res_buffer.data(), res_buffer.size(), 0, (struct sockaddr*)&server, &server_len);
 
-  auto packet_result = read_dns_packet(res_buffer);
-  if (!packet_result) {
-    std::cerr << packet_result.error();
-    return 1;
+  DnsPacket result{TRY(read_dns_packet(res_buffer))};
+  return result;
+}
+
+std::expected<void, std::string> handle_query(int sock) {
+  BytePacketBuffer req_buffer{};
+
+  sockaddr_in peer{};
+  socklen_t peer_len{};
+  recvfrom(sock, req_buffer.data(), req_buffer.size(), 0, (sockaddr*)&peer, &peer_len);
+
+  DnsPacket request{TRY(read_dns_packet(req_buffer))};
+
+  DnsPacket packet{};
+  packet.header.id = request.header.id;
+  packet.header.recursion_desired = true;
+  packet.header.recursion_available = true;
+  packet.header.response = true;
+
+  if (!request.questions.empty()) {
+    auto& question = request.questions.back();
+    std::cout << "Received query: " << question;
+
+    auto result = lookup(question.name, question.qtype);
+    if (result) {
+      packet.questions.push_back(question);
+      packet.header.rescode = result->header.rescode;
+
+      for (auto& rec : result->answers) {
+        std::cout << "Answer: " << *rec;
+        packet.answers.push_back(std::move(rec));
+      }
+
+      for (auto& rec : result->authorities) {
+        std::cout << "Authority: " << *rec;
+        packet.authorities.push_back(std::move(rec));
+      }
+
+      for (auto& rec : result->resources) {
+        std::cout << "Resource: " << *rec;
+        packet.resources.push_back(std::move(rec));
+      }
+    } else {
+      packet.header.rescode = ResultCode::SERVFAIL;
+    }
+  } else {
+    packet.header.rescode = ResultCode::FORMERR;
   }
 
-  const auto& res = *packet_result;
-  std::cout << res.header << "\n";
-  for (const auto& q : res.questions) std::cout << q << "\n";
-  for (const auto& r : res.answers) std::cout << *r << "\n";
-  for (const auto& r : res.authorities) std::cout << *r << "\n";
-  for (const auto& r : res.resources) std::cout << *r << "\n";
+  BytePacketBuffer res_buffer{};
+  TRY(write_dns_packet(res_buffer, packet));
 
-  return 0;
+  sendto(sock, res_buffer.data(), res_buffer.size(), 0, (sockaddr*)&peer, peer_len);
+
+  return {};
 }
+
+int main() {
+  int sock = socket(AF_INET, SOCK_DGRAM, 0);
+
+  sockaddr_in addr;
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(2053);
+
+  int _ = bind(sock, (sockaddr*)&addr, sizeof(addr));
+
+  while (true) {
+    auto result = handle_query(sock);
+    if (!result) {
+      std::cerr << result.error();
+    }
+  }
+}
+
+// int main() {
+//   std::string qname{"yahoo.com"};
+//   QueryType qtype{QueryType::MX};
+
+//   std::string server_ip{"8.8.8.8"};
+//   std::uint16_t port{53};
+
+//   DnsPacket packet{};
+//   packet.header.id = 6666;
+//   packet.header.questions = 1;
+//   packet.header.recursion_desired = true;
+//   packet.questions.emplace_back(qname, qtype);
+
+//   BytePacketBuffer req_buffer{};
+//   auto write_result = write_dns_packet(req_buffer, packet);
+//   if (!write_result) {
+//     std::cerr << write_result.error();
+//   }
+
+//   int sock = socket(AF_INET, SOCK_DGRAM, 0);
+//   struct sockaddr_in addr{};
+//   addr.sin_family = AF_INET;
+//   addr.sin_port = htons(port);
+//   inet_pton(AF_INET, server_ip.c_str(), &addr.sin_addr);
+
+//   sendto(sock, req_buffer.data(), req_buffer.pos(), 0, (struct sockaddr*)&addr, sizeof(addr));
+
+//   struct sockaddr_in src_addr{};
+//   socklen_t src_len = sizeof(src_addr);
+//   BytePacketBuffer res_buffer{};
+//   recvfrom(sock, res_buffer.data(), res_buffer.size(), 0, (struct sockaddr*)&src_addr, &src_len);
+//   res_buffer.seek(0);
+
+//   auto packet_result = read_dns_packet(res_buffer);
+//   if (!packet_result) {
+//     std::cerr << packet_result.error();
+//     return 1;
+//   }
+
+//   const auto& res = *packet_result;
+//   std::cout << res.header << "\n";
+//   for (const auto& q : res.questions) std::cout << q << "\n";
+//   for (const auto& r : res.answers) std::cout << *r << "\n";
+//   for (const auto& r : res.authorities) std::cout << *r << "\n";
+//   for (const auto& r : res.resources) std::cout << *r << "\n";
+
+//   return 0;
+// }
