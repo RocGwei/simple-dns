@@ -7,6 +7,7 @@ set_languages("c++23")
 
 target("simple-dns")
     set_kind("binary")
+    add_includedirs("include")
     add_files("src/*.cpp")
     set_rundir(".")
 

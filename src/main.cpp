@@ -323,7 +323,7 @@ std::ostream& operator<<(std::ostream& os, const DnsQuestion& q) {
   os << "DnsQuestion {\n"
      << "    name: \"" << q.name << "\",\n"
      << "    qtype: " << to_string(q.qtype) << "\n"
-     << "}";
+     << "}\n";
   return os;
 }
 
@@ -384,7 +384,7 @@ class ARecord : public DnsRecord {
        << "    domain: \"" << m_domain << "\",\n"
        << "    addr: " << m_addr.to_string() << ",\n"
        << "    ttl: " << m_ttl << "\n"
-       << "}";
+       << "}\n";
   };
 
   std::expected<std::size_t, std::string> write(BytePacketBuffer& buffer) const override {
@@ -396,7 +396,7 @@ class ARecord : public DnsRecord {
     TRY(buffer.write_u32(m_ttl));
     TRY(buffer.write_u16(4));
 
-    auto raw = ntohl(m_addr.addr.s_addr);
+    auto raw = m_addr.addr.s_addr;
     TRY(buffer.write_u8(static_cast<std::uint8_t>((raw >> 24) & 0xFF)));
     TRY(buffer.write_u8(static_cast<std::uint8_t>((raw >> 16) & 0xFF)));
     TRY(buffer.write_u8(static_cast<std::uint8_t>((raw >> 8) & 0xFF)));
@@ -426,7 +426,7 @@ class NsRecord : public DnsRecord {
        << "    domain: \"" << m_domain << "\",\n"
        << "    host: " << m_host << ",\n"
        << "    ttl: " << m_ttl << "\n"
-       << "}";
+       << "}\n";
   }
 
   std::expected<std::size_t, std::string> write(BytePacketBuffer& buffer) const override {
@@ -467,7 +467,7 @@ class CnameRecord : public DnsRecord {
        << "    domain: \"" << m_domain << "\",\n"
        << "    host: " << m_host << ",\n"
        << "    ttl: " << m_ttl << "\n"
-       << "}";
+       << "}\n";
   }
 
   std::expected<std::size_t, std::string> write(BytePacketBuffer& buffer) const override {
@@ -512,7 +512,7 @@ class MxRecord : public DnsRecord {
        << "    priority: " << m_priority << ",\n"
        << "    host: " << m_host << ",\n"
        << "    ttl: " << m_ttl << "\n"
-       << "}";
+       << "}\n";
   }
 
   std::expected<std::size_t, std::string> write(BytePacketBuffer& buffer) const override {
@@ -555,7 +555,7 @@ class AaaaRecord : public DnsRecord {
        << "    domain: \"" << m_domain << "\",\n"
        << "    addr: " << m_addr.to_string() << ",\n"
        << "    ttl: " << m_ttl << "\n"
-       << "}";
+       << "}\n";
   }
 
   std::expected<std::size_t, std::string> write(BytePacketBuffer& buffer) const override {
@@ -597,7 +597,7 @@ class UnknownRecord : public DnsRecord {
        << "    type: " << m_qtype << ",\n"
        << "    len: " << m_data_len << ",\n"
        << "    ttl: " << m_ttl << "\n"
-       << "}";
+       << "}\n";
   }
 
   std::expected<std::size_t, std::string> write(BytePacketBuffer& /*buffer*/) const override { return {0}; }
@@ -785,6 +785,7 @@ std::expected<DnsPacket, std::string> lookup(const std::string& qname, QueryType
   addr.sin_port = htons(43210);
   int ret = bind(sock, (struct sockaddr*)&addr, sizeof(addr));
   if (ret < 0) {
+    close(sock);
     return std::unexpected{"bind"};
   }
 
@@ -803,6 +804,7 @@ std::expected<DnsPacket, std::string> lookup(const std::string& qname, QueryType
   recvfrom(sock, res_buffer.data(), res_buffer.size(), 0, (struct sockaddr*)&server, &server_len);
 
   DnsPacket result{TRY(read_dns_packet(res_buffer))};
+  close(sock);
   return result;
 }
 
@@ -810,7 +812,7 @@ std::expected<void, std::string> handle_query(int sock) {
   BytePacketBuffer req_buffer{};
 
   sockaddr_in peer{};
-  socklen_t peer_len{};
+  socklen_t peer_len{sizeof(peer)};
   recvfrom(sock, req_buffer.data(), req_buffer.size(), 0, (sockaddr*)&peer, &peer_len);
 
   DnsPacket request{TRY(read_dns_packet(req_buffer))};
@@ -854,7 +856,7 @@ std::expected<void, std::string> handle_query(int sock) {
   BytePacketBuffer res_buffer{};
   TRY(write_dns_packet(res_buffer, packet));
 
-  sendto(sock, res_buffer.data(), res_buffer.size(), 0, (sockaddr*)&peer, peer_len);
+  sendto(sock, res_buffer.data(), res_buffer.pos(), 0, (sockaddr*)&peer, peer_len);
 
   return {};
 }
