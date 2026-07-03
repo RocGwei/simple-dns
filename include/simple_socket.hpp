@@ -57,14 +57,30 @@ class UdpSocket {
   std::expected<SocketAddr, std::error_code> peer_addr() const;
   std::expected<SocketAddr, std::error_code> local_addr() const;
 
+  // 禁用拷贝
   UdpSocket(const UdpSocket&) = delete;
-  UdpSocket(UdpSocket&& other) noexcept;
-  UdpSocket& operator=(UdpSocket&& other) noexcept;
+
+  // 移动时避免源sock关闭
+  UdpSocket(UdpSocket&& other) noexcept
+      : m_sock(other.m_sock) {
+    other.m_sock = -1;
+  };
+
+  // 移动复制运算符
+  UdpSocket& operator=(UdpSocket&& other) noexcept {
+    if (this != &other) {
+      if (m_sock >= 0) close(m_sock);
+      m_sock = other.m_sock;
+      other.m_sock = -1;
+    }
+    return *this;
+  };
   ~UdpSocket() {
     if (m_sock >= 0) close(m_sock);
   }
 
  private:
-  explicit UdpSocket(int sock);
+  explicit UdpSocket(int sock)
+      : m_sock{sock} {};
   int m_sock;
 };
